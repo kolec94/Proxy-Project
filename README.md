@@ -12,6 +12,7 @@ The initial experiment has a **$100 spending cap** and a **30-day pilot schedule
 | --- | --- |
 | [30-day pilot plan](docs/30-day-plan.md) | Budget, phased work, acquisition gates, measurement, and reinvestment |
 | [Network architecture](docs/architecture.md) | VPS and SDK responsibilities, request flow, authentication, metering, and failure behavior |
+| [VPS setup and device connections](docs/vps-setup.md) | Server preparation, ports, enrollment, tunnel protocol, deployment, and acceptance checks |
 | [Architecture diagram](docs/assets/architecture.png) | Visual overview of the network and management connections |
 
 The Markdown documents are the primary versions for ongoing repository edits. Original Word documents are retained as snapshots:
