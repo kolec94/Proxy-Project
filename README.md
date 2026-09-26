@@ -1,0 +1,75 @@
+# Proxy Project
+
+A planned residential proxy business using an independently developed SDK, consenting Windows participants, and a public VPS gateway.
+
+The initial experiment has a **$100 spending cap** and a **30-day pilot schedule**. Its purpose is to validate customer demand, acquisition quality, endpoint availability, and operating margins before expanding.
+
+**Status:** planning and architecture documentation. This repository does not yet contain a working SDK, gateway, or deployment. Financial inputs are hypotheses, not verified install quotes or profit forecasts.
+
+## Documentation
+
+| Document | What it covers |
+| --- | --- |
+| [30-day pilot plan](docs/30-day-plan.md) | Budget, phased work, acquisition gates, measurement, and reinvestment |
+| [Network architecture](docs/architecture.md) | VPS and SDK responsibilities, request flow, authentication, metering, and failure behavior |
+| [Architecture diagram](docs/assets/architecture.png) | Visual overview of the network and management connections |
+
+The Markdown documents are the primary versions for ongoing repository edits. Original Word documents are retained as snapshots:
+
+- [Original pilot plan](docs/originals/Residential_Proxy_30_Day_Plan.docx)
+- [Original architecture document](docs/originals/Residential_Proxy_Architecture.docx)
+
+Word snapshots are not automatically synchronized with future Markdown changes.
+
+## Architecture overview
+
+```mermaid
+flowchart TD
+    C["Proxy customer"] <-->|"Authenticated encrypted connection"| G["Public VPS gateway"]
+    G <-->|"Device initiated encrypted tunnel"| W["Consenting Windows endpoint"]
+    W <-->|"Residential connection"| D["Destination website"]
+    A["Owner console"] <-->|"Private administration"| M["Control API and local database"]
+    M <--> G
+```
+
+The endpoint initiates its connection to the gateway. Customers send requests through the gateway, and the endpoint opens the destination connection. Responses return through the same path. The destination sees the residential public IP.
+
+For the pilot, the gateway, tunnel service, control API, and database share one VPS. These are logical roles, not four separately purchased servers. Participant devices generally do not require inbound port forwarding.
+
+## Pilot budget
+
+| Allocation | Maximum |
+| --- | ---: |
+| Acquisition batch A | $35 |
+| Acquisition batch B, conditional on first-batch results | $35 |
+| Gateway and operating costs | $20 |
+| Contingency | $10 |
+| **Total** | **$100** |
+
+The operating budget is an allowance, not a VPS quote. Development labor and existing equipment are outside this experiment. See the [budget conditions](docs/30-day-plan.md#conditions-for-the-budget-to-work) before spending.
+
+## First milestones
+
+1. Choose one geography and obtain a real customer trial commitment.
+2. Obtain acceptable install-source quotes and distribution terms.
+3. Validate the visible Windows client, consent controls, gateway, quotas, and metering on authorized devices.
+4. Run the first acquisition batch and measure same-age cohorts.
+5. Release the second batch only after the stated quality review passes.
+6. Reconcile paid usage, cash, and costs before deciding whether to continue.
+
+The business review occurs on plan day 30. Devices acquired later in the month reach their own day-30 retention checkpoints afterward. Do not report immature cohorts as measured day-30 retention.
+
+## Product requirements
+
+- Explicit participation consent, visible status, pause, traffic caps, withdrawal, and uninstall.
+- Separate customer, device, and administrative credentials.
+- Authenticated routing, destination restrictions, quotas, and a global stop control.
+- No access to participants' private networks or metadata endpoints.
+- Minimal operational records and a defined deletion policy.
+- No fabricated traffic or unearned prepayments counted as profit.
+
+Implementation details and the rollout sequence are in the [architecture document](docs/architecture.md).
+
+## Financial interpretation
+
+Measure cost per usable retained endpoint, paid GB, variable contribution, and cash collected. Endpoint capacity alone does not create demand. Reinvest only collected profit after costs and required reserves; scale forecasts remain provisional until retention and repeat customer demand are demonstrated.
