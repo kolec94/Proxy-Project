@@ -2,7 +2,9 @@
 
 This guide defines the first deployment of your own residential proxy network: one Linux VPS, a custom gateway, and consenting Windows devices running your SDK. It extends the [network architecture](architecture.md) and [30-day plan](30-day-plan.md).
 
-**Status:** implementation blueprint. The SDK, gateway binary, API routes, and protocol below are proposed interfaces, not software already present in this repository. No VPS has been provisioned. Commands marked as examples require the stated prerequisites.
+**Implementation update:** [Version 0.1.0](sdk.md) now provides a restricted gateway and Windows participant client. It uses custom TLS Upgrade framing instead of WebSockets, one stream per device, and local CLI administration instead of the proposed admin API. Follow its actual startup commands; the broader interfaces below remain a target design.
+
+**Status:** deployment blueprint with a restricted pilot implementation. The broader API routes and protocol below are proposed interfaces; see [SDK setup](sdk.md) for what is implemented. No VPS has been provisioned. Commands marked as examples require the stated prerequisites.
 
 ## 1. Pilot deployment choice
 
@@ -62,7 +64,7 @@ An alternative is Caddy on TCP 443 for enrollment and device WebSockets, with a 
 4. Configure both the provider firewall and host firewall. Allow owner SSH before enabling deny-by-default inbound rules.
 5. Create DNS records for a hostname you control, such as `gateway.your-domain.tld`, pointing to the VPS. Publish an AAAA record only if IPv6 listeners and firewall rules are correctly configured.
 6. Obtain a publicly trusted TLS certificate through an ACME client. Select HTTP validation with a restricted port-80 challenge handler or DNS validation with narrowly scoped DNS credentials. Automate renewal and test certificate reload.
-7. Install your versioned gateway build only after the local tests pass. This repository currently has no gateway installation command.
+7. Install your versioned gateway build only after the local tests pass, using the commands in [SDK setup](sdk.md).
 
 Example host firewall commands, after replacing the documentation address with your actual trusted owner address:
 

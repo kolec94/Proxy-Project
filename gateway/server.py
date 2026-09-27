@@ -1,0 +1,265 @@
+"""Small TLS-only gateway for an allowlisted pilot; no public admin API."""
+import argparse
+import asyncio
+import base64
+import contextlib
+import json
+from pathlib import Path
+import secrets
+import ssl
+import time
+from .store import Store
+from proxy_sdk.policy import Policy
+from proxy_sdk.protocol import Wire, headers, close, CHUNK, TIMEOUT, encode, decode
+from proxy_sdk.storage import DISCLOSURE_VERSION
+
+
+class Device:
+    def __init__(self, ident, wire):
+        self.id, self.wire = ident, wire
+        self.busy = False
+        self.session = None
+        self.ready = False
+
+
+class Session:
+    def __init__(self, writer, token):
+        self.id = secrets.token_hex(16)
+        self.writer, self.token = writer, token
+        self.opened = asyncio.get_running_loop().create_future()
+        self.done = asyncio.Event()
+        self.accepted = asyncio.Event()
+
+
+class Gateway:
+    def __init__(self, store, policy):
+        self.store, self.policy = store, policy
+        self.devices = {}
+        self.server = None
+        self.connections = set()
+        self.tasks = set()
+
+    async def start(self, context, host="127.0.0.1", port=0):
+        self.server = await asyncio.start_server(self.handle, host, port, ssl=context,
+                                                ssl_handshake_timeout=5, limit=32768)
+        return self.server.sockets[0].getsockname()[1]
+
+    async def stop(self):
+        self.server.close()
+        await self.server.wait_closed()
+        for writer in list(self.connections):
+            writer.close()
+        for task in list(self.tasks):
+            task.cancel()
+        await asyncio.gather(*list(self.tasks), return_exceptions=True)
+
+    async def response(self, writer, code, body=None):
+        data = json.dumps(body or {}).encode()
+        writer.write((f"HTTP/1.1 {code}\r\nContent-Type: application/json\r\n"
+                      f"Content-Length: {len(data)}\r\nConnection: close\r\n\r\n").encode() + data)
+        await asyncio.wait_for(writer.drain(), TIMEOUT)
+
+    async def handle(self, reader, writer):
+        task = asyncio.current_task()
+        if len(self.connections) >= 64:
+            await close(writer)
+            return
+        self.connections.add(writer)
+        self.tasks.add(task)
+        try:
+            line, head = await headers(reader)
+            method, target, version = line.split()
+            if version != "HTTP/1.1" or "transfer-encoding" in head:
+                raise ValueError("unsupported HTTP framing")
+            if method == "CONNECT":
+                await self.proxy(reader, writer, target, head)
+            elif method == "POST" and target in ("/v1/devices/enroll", "/v1/devices/revoke"):
+                token = head.get("authorization", "").removeprefix("Bearer ")
+                n = int(head.get("content-length", "0"))
+                if not 0 < n <= 2048:
+                    raise ValueError("invalid body size")
+                body = json.loads(await asyncio.wait_for(reader.readexactly(n), TIMEOUT))
+                if target.endswith("enroll"):
+                    if body.get("consent") is not True or body.get("consent_version") != DISCLOSURE_VERSION:
+                        raise ValueError("consent required")
+                    result = self.store.enroll(token, DISCLOSURE_VERSION)
+                else:
+                    ident = self.store.revoke(token)
+                    if not ident:
+                        raise ValueError("invalid device")
+                    old = self.devices.get(ident)
+                    if old:
+                        old.wire.writer.close()
+                    result = {"revoked": True}
+                await self.response(writer, "200 OK", result)
+            elif method == "GET" and target == "/v1/devices/tunnel":
+                await self.tunnel(reader, writer, head)
+            else:
+                await self.response(writer, "404 Not Found")
+        except (ValueError, KeyError, TypeError, OSError, asyncio.TimeoutError,
+                asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            # No exceptions, credentials or destination payloads go into logs.
+            pass
+        finally:
+            self.connections.discard(writer)
+            self.tasks.discard(task)
+            await close(writer)
+
+    async def tunnel(self, reader, writer, head):
+        ident = self.store.device(head.get("authorization", "").removeprefix("Bearer "))
+        if not ident or head.get("upgrade") != "proxy-project-v1" or head.get("connection", "").lower() != "upgrade":
+            await self.response(writer, "401 Unauthorized")
+            return
+        if ident in self.devices:
+            await self.response(writer, "409 Conflict")
+            return
+        device = Device(ident, Wire(reader, writer))
+        self.devices[ident] = device
+        heartbeat = None
+        try:
+            writer.write(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: proxy-project-v1\r\n\r\n")
+            await writer.drain()
+            hello = await asyncio.wait_for(device.wire.recv(), 10)
+            if hello != {"type": "HELLO", "version": 1}:
+                raise ValueError("unsupported protocol")
+            device.ready = True
+            async def ping():
+                while True:
+                    await asyncio.sleep(20)
+                    await device.wire.send("PING")
+            heartbeat = asyncio.create_task(ping())
+            while True:
+                msg = await asyncio.wait_for(device.wire.recv(), 75)
+                kind = msg["type"]
+                if kind == "PONG":
+                    continue
+                session = device.session
+                if not session or msg.get("id") != session.id:
+                    raise ValueError("unexpected stream")
+                if kind in ("OPEN_OK", "OPEN_ERROR") and not session.opened.done():
+                    session.opened.set_result(kind == "OPEN_OK")
+                elif kind == "DATA" and session.opened.done() and session.opened.result():
+                    # Do not write payload before the customer's 200 CONNECT response.
+                    await asyncio.wait_for(session.accepted.wait(), TIMEOUT)
+                    data = decode(msg.get("data"))
+                    self.store.consume(session.token, len(data))
+                    session.writer.write(data)
+                    await asyncio.wait_for(session.writer.drain(), TIMEOUT)
+                elif kind == "CLOSE":
+                    session.done.set()
+                    # Exit closes the device tunnel; reconnect creates a clean
+                    # generation so late frames cannot affect a future stream.
+                    break
+                else:
+                    raise ValueError("unexpected frame")
+        finally:
+            self.devices.pop(ident, None)
+            if device.session:
+                if not device.session.opened.done():
+                    device.session.opened.set_result(False)
+                device.session.done.set()
+            if heartbeat:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def proxy(self, reader, writer, target, head):
+        raw = head.get("proxy-authorization", "")
+        try:
+            if not raw.startswith("Basic "):
+                raise ValueError("missing proxy auth")
+            _, token = base64.b64decode(raw[6:], validate=True).decode().split(":", 1)
+            if not self.store.valid_customer(token):
+                raise ValueError("invalid customer")
+        except ValueError:
+            await self.response(writer, "407 Proxy Authentication Required")
+            return
+        if "content-length" in head:
+            await self.response(writer, "400 Bad Request")
+            return
+        try:
+            host, port_s = target.rsplit(":", 1)
+            port = int(port_s)
+            host = self.policy.check(host, port)
+        except ValueError:
+            await self.response(writer, "403 Forbidden")
+            return
+        device = next((d for d in self.devices.values() if d.ready and not d.busy), None)
+        if device is None:
+            await self.response(writer, "503 Service Unavailable")
+            return
+        device.busy = True
+        session = device.session = Session(writer, token)
+        send_task = done_task = None
+        try:
+            await device.wire.send("OPEN", id=session.id, host=host, port=port)
+            if not await asyncio.wait_for(session.opened, 15):
+                await self.response(writer, "502 Bad Gateway")
+                return
+            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await writer.drain()
+            session.accepted.set()
+            async def forward():
+                while not session.done.is_set():
+                    data = await asyncio.wait_for(reader.read(CHUNK), 60)
+                    if not data:
+                        await device.wire.send("EOF", id=session.id)
+                        return
+                    self.store.consume(token, len(data))
+                    await device.wire.send("DATA", id=session.id, data=encode(data))
+            send_task = asyncio.create_task(forward())
+            done_task = asyncio.create_task(session.done.wait())
+            done, _ = await asyncio.wait([send_task, done_task], timeout=300,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if send_task in done:
+                await send_task
+                await asyncio.wait_for(session.done.wait(), 60)
+        finally:
+            for task in (send_task, done_task):
+                if task:
+                    task.cancel()
+            await asyncio.gather(*[t for t in (send_task, done_task) if t], return_exceptions=True)
+            device.wire.writer.close()  # One stream per tunnel generation.
+            session.done.set()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db", required=True)
+    parser.add_argument("--issue-grant", action="store_true")
+    parser.add_argument("--issue-customer", type=int, metavar="QUOTA_BYTES")
+    parser.add_argument("--cert")
+    parser.add_argument("--key")
+    parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8443)
+    parser.add_argument("--allow-host", action="append")
+    args = parser.parse_args()
+    Path(args.db).parent.mkdir(parents=True, exist_ok=True)
+    store = Store(args.db)
+    if args.issue_grant:
+        print(store.grant())
+        return
+    if args.issue_customer is not None:
+        print(store.customer(args.issue_customer))
+        return
+    if not args.cert or not args.key or not args.allow_host:
+        parser.error("serving requires --cert, --key and at least one --allow-host")
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.set_alpn_protocols(["http/1.1"])
+    ctx.load_cert_chain(args.cert, args.key)
+    gateway = Gateway(store, Policy(args.allow_host))
+    async def run():
+        await gateway.start(ctx, args.bind, args.port)
+        print(f"Pilot gateway listening on {args.bind}:{args.port}; max 64 connections")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await gateway.stop()
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

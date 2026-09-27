@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proxy-project-sdk"
+version = "0.1.0"
+description = "Consent-based residential relay SDK and Windows pilot client"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+proxy-pilot-gateway = "gateway.server:main"
+
+[tool.setuptools.packages.find]
+include = ["proxy_sdk*", "gateway*"]
