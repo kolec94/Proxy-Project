@@ -196,6 +196,93 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
             return await original(host, port, **kw)
         return patch('proxy_sdk.client.asyncio.open_connection', side_effect=dial)
 
+    async def socks_login(self, token=None, username=b'pilot'):
+        if not self.gateway.socks_server:
+            self.socks_port = await self.gateway.start_socks(0)
+        reader, writer = await asyncio.open_connection('127.0.0.1', self.socks_port)
+        self.addAsyncCleanup(close, writer)
+        writer.write(b'\x05\x01\x02')
+        await writer.drain()
+        self.assertEqual(await reader.readexactly(2), b'\x05\x02')
+        password = (token or self.customer).encode()
+        writer.write(bytes([1, len(username)]) + username + bytes([len(password)]) + password)
+        await writer.drain()
+        auth = await reader.readexactly(2)
+        return auth, reader, writer
+
+    async def socks_request(self, reader, writer, host=b'example.com', port=443, command=1, kind=3):
+        writer.write(bytes([5, command, 0, kind, len(host)]) + host + port.to_bytes(2, 'big'))
+        await writer.drain()
+        return (await asyncio.wait_for(reader.readexactly(10), 5))[1]
+
+    async def test_socks_auth_and_no_anonymous(self):
+        for token in ('invalid', self.store.grant()):
+            auth, reader, writer = await self.socks_login(token)
+            self.assertEqual(auth, b'\x01\x01')
+            self.assertEqual(await reader.read(), b'')
+        auth, _, _ = await self.socks_login(username=b'wrong')
+        self.assertEqual(auth, b'\x01\x01')
+        reader, writer = await asyncio.open_connection('127.0.0.1', self.socks_port)
+        self.addAsyncCleanup(close, writer)
+        writer.write(b'\x05\x01\x00')
+        await writer.drain()
+        self.assertEqual(await reader.readexactly(2), b'\x05\xff')
+        self.assertEqual(await reader.read(), b'')
+
+    async def test_socks_policy_and_unsupported_requests(self):
+        for kw, expected in [({'host': b'forbidden.example'}, 2), ({'port': 80}, 2),
+                             ({'command': 2}, 7), ({'command': 3}, 7),
+                             ({'kind': 1}, 8), ({'kind': 4}, 8), ({'host': b'\xff'}, 2)]:
+            auth, reader, writer = await self.socks_login()
+            self.assertEqual(auth, b'\x01\x00')
+            self.assertEqual(await self.socks_request(reader, writer, **kw), expected)
+        self.assertEqual(self.gateway.devices, {})
+
+    async def test_socks_no_device(self):
+        _, reader, writer = await self.socks_login()
+        self.assertEqual(await self.socks_request(reader, writer), 3)
+
+    async def test_socks_relay_metering_and_pause(self):
+        await self.enrolled()
+        with patch.object(Policy, 'resolve', AsyncMock(return_value='93.184.216.34')), self.local_destination():
+            await self.client.start()
+            await self.available()
+            _, reader, writer = await self.socks_login()
+            self.assertEqual(await self.socks_request(reader, writer), 0)
+            payload = b'socks-relay' * 1000
+            writer.write(payload)
+            await writer.drain()
+            self.assertEqual(await asyncio.wait_for(reader.readexactly(len(payload)), 5), payload)
+            self.assertEqual(self.state.data['used'], 2 * len(payload))
+            self.assertEqual(self.store.db.execute('SELECT used FROM customers').fetchone()[0], 2 * len(payload))
+            # HTTP and SOCKS share the same one-session device reservation.
+            status, _, http_writer = await self.connect()
+            self.assertIn('503', status)
+            await close(http_writer)
+            await self.client.pause()
+            self.assertEqual(await asyncio.wait_for(reader.read(), 5), b'')
+
+    async def test_socks_private_dns_rejected(self):
+        await self.enrolled()
+        await self.client.start()
+        await self.available()
+        with patch.object(Policy, 'resolve', AsyncMock(side_effect=PolicyError('private'))):
+            _, reader, writer = await self.socks_login()
+            self.assertEqual(await self.socks_request(reader, writer), 4)
+
+    async def test_socks_customer_cap_stops_forwarding(self):
+        await self.enrolled()
+        token = self.store.customer(3)
+        with patch.object(Policy, 'resolve', AsyncMock(return_value='93.184.216.34')), self.local_destination():
+            await self.client.start()
+            await self.available()
+            _, reader, writer = await self.socks_login(token)
+            self.assertEqual(await self.socks_request(reader, writer), 0)
+            writer.write(b'over-quota')
+            await writer.drain()
+            self.assertEqual(await asyncio.wait_for(reader.read(), 5), b'')
+            self.assertEqual(self.state.data['used'], 0)
+
     async def test_no_sharing_before_start(self):
         await self.enrolled()
         self.assertEqual(self.gateway.devices, {})

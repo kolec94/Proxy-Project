@@ -2,7 +2,7 @@
 
 This guide defines the first deployment of your own residential proxy network: one Linux VPS, a custom gateway, and consenting Windows devices running your SDK. It extends the [network architecture](architecture.md) and [30-day plan](30-day-plan.md).
 
-**Implementation update:** [Version 0.1.0](sdk.md) now provides a restricted gateway and Windows participant client. It uses custom TLS Upgrade framing instead of WebSockets, one stream per device, and local CLI administration instead of the proposed admin API. Follow its actual startup commands; the broader interfaces below remain a target design.
+**Implementation update:** [Version 0.1.1](sdk.md) now provides a restricted gateway and Windows participant client. It uses custom TLS Upgrade framing instead of WebSockets, one stream per device, and local CLI administration instead of the proposed admin API. Follow its actual startup commands; the broader interfaces below remain a target design.
 
 **Status:** deployment blueprint with a restricted pilot implementation. The broader API routes and protocol below are proposed interfaces; see [SDK setup](sdk.md) for what is implemented. No VPS has been provisioned. Commands marked as examples require the stated prerequisites.
 

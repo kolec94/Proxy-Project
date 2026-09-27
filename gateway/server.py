@@ -1,4 +1,4 @@
-"""Small TLS-only gateway for an allowlisted pilot; no public admin API."""
+"""TLS gateway with optional loopback SOCKS5 listener for an allowlisted pilot; no public admin API."""
 import argparse
 import asyncio
 import base64
@@ -36,6 +36,7 @@ class Gateway:
         self.store, self.policy = store, policy
         self.devices = {}
         self.server = None
+        self.socks_server = None
         self.connections = set()
         self.tasks = set()
 
@@ -44,9 +45,17 @@ class Gateway:
                                                 ssl_handshake_timeout=5, limit=32768)
         return self.server.sockets[0].getsockname()[1]
 
+    async def start_socks(self, port=1080):
+        # RFC 1929 credentials are plaintext: expose only through SSH forwarding.
+        self.socks_server = await asyncio.start_server(
+            self.handle_socks, "127.0.0.1", port, limit=32768)
+        return self.socks_server.sockets[0].getsockname()[1]
+
     async def stop(self):
-        self.server.close()
-        await self.server.wait_closed()
+        for server in (self.server, self.socks_server):
+            if server:
+                server.close()
+                await server.wait_closed()
         for writer in list(self.connections):
             writer.close()
         for task in list(self.tasks):
@@ -139,7 +148,7 @@ class Gateway:
                 if kind in ("OPEN_OK", "OPEN_ERROR") and not session.opened.done():
                     session.opened.set_result(kind == "OPEN_OK")
                 elif kind == "DATA" and session.opened.done() and session.opened.result():
-                    # Do not write payload before the customer's 200 CONNECT response.
+                    # Do not write payload before the customer success response.
                     await asyncio.wait_for(session.accepted.wait(), TIMEOUT)
                     data = decode(msg.get("data"))
                     self.store.consume(session.token, len(data))
@@ -162,6 +171,72 @@ class Gateway:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
 
+    async def socks_reply(self, writer, code):
+        # Relay protocol does not expose the endpoint's bound socket address.
+        writer.write(bytes([5, code, 0, 1]) + b"\x00" * 6)
+        await asyncio.wait_for(writer.drain(), TIMEOUT)
+
+    async def handle_socks(self, reader, writer):
+        task = asyncio.current_task()
+        if len(self.connections) >= 64:
+            await close(writer)
+            return
+        self.connections.add(writer)
+        self.tasks.add(task)
+        try:
+            # Total negotiation deadline prevents slow clients occupying slots.
+            async with asyncio.timeout(TIMEOUT):
+                version, count = await reader.readexactly(2)
+                if version != 5 or count == 0:
+                    return
+                methods = await reader.readexactly(count)
+                writer.write(b"\x05\x02" if 2 in methods else b"\x05\xff")
+                await writer.drain()
+                if 2 not in methods:
+                    return
+                version, length = await reader.readexactly(2)
+                if version != 1 or length == 0:
+                    writer.write(b"\x01\x01")
+                    await writer.drain()
+                    return
+                username = await reader.readexactly(length)
+                length = (await reader.readexactly(1))[0]
+                password = await reader.readexactly(length)
+                try:
+                    token = password.decode("ascii")
+                except UnicodeDecodeError:
+                    token = ""
+                valid = username == b"pilot" and length > 0 and self.store.valid_customer(token)
+                writer.write(b"\x01\x00" if valid else b"\x01\x01")
+                await writer.drain()
+                if not valid:
+                    return
+                version, command, reserved, kind = await reader.readexactly(4)
+                if version != 5 or reserved != 0:
+                    await self.socks_reply(writer, 1)
+                    return
+                if command != 1:  # No BIND or UDP ASSOCIATE.
+                    await self.socks_reply(writer, 7)
+                    return
+                if kind != 3:  # Domain-only to preserve exact hostname policy.
+                    await self.socks_reply(writer, 8)
+                    return
+                length = (await reader.readexactly(1))[0]
+                raw_host = await reader.readexactly(length)
+                port = int.from_bytes(await reader.readexactly(2), "big")
+                try:
+                    host = self.policy.check(raw_host.decode("ascii"), port)
+                except ValueError:
+                    await self.socks_reply(writer, 2)
+                    return
+            await self.relay(reader, writer, token, host, port, socks=True)
+        except (ValueError, OSError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            self.connections.discard(writer)
+            self.tasks.discard(task)
+            await close(writer)
+
     async def proxy(self, reader, writer, target, head):
         raw = head.get("proxy-authorization", "")
         try:
@@ -183,9 +258,20 @@ class Gateway:
         except ValueError:
             await self.response(writer, "403 Forbidden")
             return
+        await self.relay(reader, writer, token, host, port)
+
+    async def relay(self, reader, writer, token, host, port, socks=False):
+        async def reply(code):
+            if socks:
+                await self.socks_reply(writer, {200: 0, 503: 3, 502: 4}[code])
+            elif code == 200:
+                writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                await asyncio.wait_for(writer.drain(), TIMEOUT)
+            else:
+                await self.response(writer, {503: "503 Service Unavailable", 502: "502 Bad Gateway"}[code])
         device = next((d for d in self.devices.values() if d.ready and not d.busy), None)
         if device is None:
-            await self.response(writer, "503 Service Unavailable")
+            await reply(503)
             return
         device.busy = True
         session = device.session = Session(writer, token)
@@ -193,10 +279,9 @@ class Gateway:
         try:
             await device.wire.send("OPEN", id=session.id, host=host, port=port)
             if not await asyncio.wait_for(session.opened, 15):
-                await self.response(writer, "502 Bad Gateway")
+                await reply(502)
                 return
-            writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            await writer.drain()
+            await reply(200)
             session.accepted.set()
             async def forward():
                 while not session.done.is_set():
@@ -232,7 +317,10 @@ def main():
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--allow-host", action="append")
+    parser.add_argument("--socks-port", type=int, help="Enable loopback-only SOCKS5 on this port; use SSH forwarding")
     args = parser.parse_args()
+    if args.socks_port is not None and not 1 <= args.socks_port <= 65535:
+        parser.error("--socks-port must be between 1 and 65535")
     Path(args.db).parent.mkdir(parents=True, exist_ok=True)
     store = Store(args.db)
     if args.issue_grant:
@@ -250,6 +338,9 @@ def main():
     gateway = Gateway(store, Policy(args.allow_host))
     async def run():
         await gateway.start(ctx, args.bind, args.port)
+        if args.socks_port is not None:
+            await gateway.start_socks(args.socks_port)
+            print(f"SOCKS5 listening on 127.0.0.1:{args.socks_port}; SSH forwarding required for remote clients")
         print(f"Pilot gateway listening on {args.bind}:{args.port}; max 64 connections")
         try:
             await asyncio.Event().wait()

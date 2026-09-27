@@ -46,13 +46,13 @@ jobs:
       - name: Checksum installer
         shell: pwsh
         run: |
-          $file = 'dist/ProxyProject-Setup-0.1.0.exe'
+          $file = 'dist/ProxyProject-Setup-0.1.1.exe'
           $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
-          "$hash  ProxyProject-Setup-0.1.0.exe" | Set-Content dist/SHA256SUMS.txt
+          "$hash  ProxyProject-Setup-0.1.1.exe" | Set-Content dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: ProxyProject-Windows-0.1.0
+          name: ProxyProject-Windows-0.1.1
           path: |
-            dist/ProxyProject-Setup-0.1.0.exe
+            dist/ProxyProject-Setup-0.1.1.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error

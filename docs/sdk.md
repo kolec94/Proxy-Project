@@ -1,6 +1,6 @@
 # SDK and Windows participant client
 
-Version 0.1.0 implements a restricted, consent-based pilot: a shared Python networking library, a visible Windows application, and a matching authenticated TLS gateway. It is not yet a general-purpose proxy distribution SDK for third-party apps.
+Version 0.1.1 implements a restricted, consent-based pilot: a shared Python networking library, a visible Windows application, and a matching authenticated TLS gateway. It is not yet a general-purpose proxy distribution SDK for third-party apps.
 
 ## What works
 
@@ -29,7 +29,7 @@ Each device family needs its own package. Android phones and TV can share much o
 ## Install the Windows participant
 
 1. Open the repository's **Actions** tab and select a successful **Test SDK and build Windows participant** run for the current commit.
-2. Download the `ProxyProject-Windows-0.1.0` artifact. It contains `ProxyProject-Setup-0.1.0.exe` and its SHA-256 checksum.
+2. Download the `ProxyProject-Windows-0.1.1` artifact. It contains `ProxyProject-Setup-0.1.1.exe` and its SHA-256 checksum.
 3. Verify the downloaded file using `Get-FileHash` in PowerShell and compare it with `SHA256SUMS.txt`.
 4. Run the per-user installer and launch **Proxy Project** from the Start menu.
 5. Enter the operator's HTTPS gateway origin, one-time enrollment code, exact permitted domains, and daily cap.
@@ -82,11 +82,45 @@ These commands print newly issued secrets. Deliver them privately; do not paste 
 
 A proxy customer must support an **HTTPS proxy**, meaning TLS to the proxy itself, and HTTP/1.1 CONNECT. Use proxy username `pilot` and the issued customer token as the password. Customer-to-destination TLS remains inside CONNECT. Never put customer credentials in documentation or URLs committed to this repository.
 
+## SOCKS5 customer access
+
+Version 0.1.1 adds optional SOCKS5 TCP CONNECT alongside HTTPS CONNECT. Both use the same customer tokens, quotas, device pool, consent controls, and reverse TLS tunnels. Existing participants can serve either customer protocol; no SOCKS listener runs on a participant device.
+
+Add `--socks-port 1080` to the gateway startup command. This binds **127.0.0.1:1080 only**, regardless of `--bind`, which controls the HTTPS listener. SOCKS5 username/password negotiation does not encrypt credentials or traffic, so the pilot deliberately requires encrypted SSH forwarding for remote access. Do not expose port 1080 through the VPS firewall or a public TCP forwarder.
+
+From the operator's client machine, establish the SSH tunnel using your existing authorized SSH account:
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:1080:127.0.0.1:1080 OWNER@YOUR_VPS
+```
+
+Configure the proxy client:
+
+| Setting | Value |
+| --- | --- |
+| Protocol | SOCKS5 with remote DNS (`socks5h`) |
+| Host / port | `127.0.0.1` / `1080` on the client machine |
+| Username | `pilot` |
+| Password | Issued customer token |
+| Destination | Exact approved hostname, TCP port 443 |
+
+For an operator test, curl can prompt for the proxy password instead of putting the token in command history:
+
+```bash
+curl --proxy socks5h://127.0.0.1:1080 --proxy-user pilot https://example.com/
+```
+
+Replace `example.com` with a hostname approved by both gateway and participant. A consenting participant must be connected and started. Destination DNS resolution and private-address checks happen on that participant. Local DNS mode, IPv4/IPv6 literal requests, BIND, and UDP ASSOCIATE are rejected. No anonymous authentication is supported.
+
+The implementation is a restricted SOCKS5 subset using username/password negotiation (no GSSAPI). Success replies use `0.0.0.0:0` for the bound address because the relay protocol does not expose the residential socket's local address. Replies report unsupported command (7), unsupported address type (8), policy denial (2), unavailable device (3), or failed destination open (4). The aggregate 64-connection limit covers both gateway listeners.
+
+This SSH setup is for an operator pilot, not a self-service customer access product. Before giving outside customers access, design isolated forwarding-only accounts or an authenticated encrypted ingress; do not give customers your administrative SSH account.
+
 ## Implemented transport versus earlier blueprint
 
 The earlier VPS guide describes a future WebSocket transport. This version uses **HTTP/1.1 Upgrade: proxy-project-v1 over verified TLS**, followed by length-prefixed JSON frames. It is **not WebSocket-compatible**. Connect the client directly to this gateway listener; an ordinary Caddy HTTP reverse proxy configuration is not a drop-in frontend for it.
 
-All enrollment, revocation, device and CONNECT requests share the configured TLS port. Version one uses one stream per tunnel generation. When a stream completes or fails, the tunnel closes; the SDK reconnects with backoff. Consequently the device may be briefly unavailable between customer sessions. Persistent multiple-stream multiplexing is deferred.
+All enrollment, revocation, device and HTTPS CONNECT requests share the configured TLS port. Optional SOCKS5 uses its separate loopback listener. Version one uses one stream per tunnel generation. When a stream completes or fails, the tunnel closes; the SDK reconnects with backoff. Consequently the device may be briefly unavailable between customer sessions. Persistent multiple-stream multiplexing is deferred.
 
 Frames have a 4-byte unsigned big-endian length followed by UTF-8 JSON, at most 24,576 bytes. DATA carries strict Base64, at most 8,192 decoded bytes. Implemented messages are HELLO, PING/PONG, OPEN, OPEN_OK/OPEN_ERROR, DATA, EOF and CLOSE. One reader task owns each transport; writes are serialized. Bounded stream buffers and drain timeouts apply TCP backpressure. This version does not implement WINDOW_UPDATE.
 
@@ -125,3 +159,6 @@ Do not buy installs solely because the unit tests or installer build pass. Use t
 - [Python 3.12 TLS documentation](https://docs.python.org/3.12/library/ssl.html)
 - [Microsoft user-scoped DPAPI](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
 - [PyInstaller platform-specific builds](https://pyinstaller.org/en/stable/)
+
+- [SOCKS5 protocol — RFC 1928](https://www.rfc-editor.org/rfc/rfc1928)
+- [Username/password negotiation — RFC 1929](https://www.rfc-editor.org/rfc/rfc1929)

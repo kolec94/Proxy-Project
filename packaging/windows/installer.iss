@@ -1,12 +1,12 @@
 [Setup]
 AppId=ProxyProjectParticipantPilot
 AppName=Proxy Project Participant Pilot
-AppVersion=0.1.0
+AppVersion=0.1.1
 DefaultDirName={localappdata}\Programs\ProxyProject
 DefaultGroupName=Proxy Project
 PrivilegesRequired=lowest
 OutputDir=..\..\dist
-OutputBaseFilename=ProxyProject-Setup-0.1.0
+OutputBaseFilename=ProxyProject-Setup-0.1.1
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

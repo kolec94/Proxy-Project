@@ -59,6 +59,12 @@ async def close(writer):
             await asyncio.wait_for(writer.wait_closed(), 2)
         except (OSError, asyncio.TimeoutError):
             pass
+        except asyncio.CancelledError:
+            # A previous cancelled close can cancel StreamWriter's shared
+            # close waiter. Preserve actual caller cancellation, but allow
+            # subsequent cleanup of the already-closed socket to finish.
+            if asyncio.current_task().cancelling():
+                raise
 
 
 async def headers(reader):

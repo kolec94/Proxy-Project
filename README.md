@@ -1,10 +1,12 @@
 # Proxy Project
 
-A residential proxy pilot with a shared SDK, a visible Windows participant app, and an authenticated TLS gateway.
+A residential proxy pilot with a shared SDK, a visible Windows participant app, and a reverse TLS gateway supporting HTTPS CONNECT and authenticated SOCKS5.
+
+[SOCKS5 setup](docs/sdk.md#socks5-customer-access) uses a loopback listener through SSH forwarding.
 
 The initial experiment has a **$100 spending cap** and a **30-day pilot schedule**. Its purpose is to validate customer demand, acquisition quality, endpoint availability, and operating margins before expanding.
 
-**Status:** version 0.1.0 pilot implementation. The repository includes a working restricted SDK/gateway pair, automated tests, and a Windows installer build workflow. No VPS is deployed. Windows distribution requires a successful build, a real-machine smoke test, and code signing before paid rollout. Financial inputs remain hypotheses.
+**Status:** version 0.1.1 pilot implementation. The repository includes a working restricted SDK/gateway pair, automated tests, and a Windows installer build workflow. No VPS is deployed. Windows distribution requires a successful build, a real-machine smoke test, and code signing before paid rollout. Financial inputs remain hypotheses.
 
 ## Documentation
 
@@ -36,7 +38,7 @@ flowchart TD
 
 The endpoint initiates its connection to the gateway. Customers send requests through the gateway, and the endpoint opens the destination connection. Responses return through the same path. The destination sees the residential public IP.
 
-The overview shows the target design. Version 0.1.0 uses a custom TLS Upgrade protocol, one stream per device, and local CLI administration; the owner console and WebSocket transport are not implemented. See [SDK documentation](docs/sdk.md).
+The overview shows the target design. Version 0.1.1 uses a custom TLS Upgrade protocol, one stream per device, and local CLI administration; the owner console and WebSocket transport are not implemented. See [SDK documentation](docs/sdk.md).
 
 For the pilot, the gateway, tunnel service, control API, and database share one VPS. These are logical roles, not four separately purchased servers. Participant devices generally do not require inbound port forwarding.
 
@@ -84,7 +86,7 @@ Measure cost per usable retained endpoint, paid GB, variable contribution, and c
 | --- | --- |
 | `proxy_sdk/` | Portable client, participant policy, framing and state |
 | `apps/windows/main.py` | Visible consent and control UI |
-| `gateway/` | TLS enrollment, device relay and customer CONNECT gateway |
+| `gateway/` | TLS enrollment, reverse device relay, HTTPS CONNECT and optional SOCKS5 |
 | `tests/` | Unit and local TLS integration tests |
 | `packaging/windows/` | Per-user Windows installer definition |
 | `.github/workflows/test-and-build.yml` | Linux/Windows tests and Windows installer artifact |
